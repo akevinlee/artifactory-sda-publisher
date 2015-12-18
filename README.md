@@ -1,0 +1,1 @@
+Artifactory to Serena Deployment Automation Publisher
