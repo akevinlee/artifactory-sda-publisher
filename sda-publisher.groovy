@@ -48,6 +48,8 @@ import org.artifactory.fs.ItemInfo
 import org.artifactory.repo.RepoPath
 import org.artifactory.mime.MavenNaming
 
+import static org.artifactory.util.PathUtils.getExtension
+
 import static SDAUploadStatuses.*
 import static com.google.common.collect.Multimaps.forMap
 
@@ -67,7 +69,9 @@ enum SDAUploadStatuses {
     UPLOADED, // State of artifacts already uploaded and upload command returned correctly
     FAILED_UPLOAD, // State of artifacts where upload command failed
 	NOT_MAPPED, // State of artifacts if not mapped to SDA component
+	NOT_EXISTS, // State of artifacts if SDA component does not exist
     UNSUPPORTED, // State of artefact when the type is not supported
+	UNKNOWN, // Some form of unknown error ...
 
     static final SDA_STATUS_PROP_NAME = 'sda.status'
     static final SDA_RESULT_PROP_NAME = 'sda.url'
@@ -84,30 +88,25 @@ def sdaDefaults = sdaConfig.defaults.flatten()
 def sdaMapping = sdaConfig.mapping.flatten()
 String sdaServerURL = sdaConfig.defaults.serverURL
 if (!sdaServerURL.endsWith("/")) {
-    sdaServerURL = sdaServerURL + "/";
+    sdaServerURL = sdaServerURL + "/"
 }
 String sdaUsername = sdaConfig.defaults.username
 String sdaPassword = sdaConfig.defaults.password
+String sdaAuthToken = createAuthToken(sdaUsername, sdaPassword)
 
 log.info "Serena Deployment Automation Publisher"
+log.debug "Default SDA server = " + sdaServerURL
+log.debug "Default SDA username = " + sdaUsername
 
-//def p = 'microsoft.web.infrastructure'
-//def flatSdaConfig = sdaConfig.flatten()
-//String test1 = sdaMapping.get(p + '.component')
-//String test2 = sdaConfig.mapping.microsoft.web.infrastructure.component
-//log.info "test1 = ${test1}; test2 = ${test2}"
+checkServerExists(sdaServerURL, sdaAuthToken)
 
-log.debug "SDA server = " + sdaServerURL
-log.debug "Default SDA username = >" + sdaUsername + "<"
-//log.info "password = >" + sdaPassword + "<"
-//log.info "token = " + sdaAuthToken
 
 //
 // Artifactory user plugin extension points
 //
 
 jobs {
-    // activate SDA Upload workflow every 5 minutes on all new (or other state) items
+    // activate SDA Upload workflow every 5 minutes on all NEW items
     activateWorkflow(interval: 20000, delay: 2000) {
         def filter = [:]
         filter.put(SDA_STATUS_PROP_NAME, NEW.name())
@@ -117,15 +116,20 @@ jobs {
             setSDAStatus(newArtifact, PENDING)
             // Execute command
             try {
-                def result = SDAUpload(newArtifact, sdaDefaults, sdaMapping)
+                String result = SDAUpload(newArtifact, sdaDefaults, sdaMapping)
 				if (result == "NOT MAPPED") {
-					// artifact not mapping to SDA component, ignore it
+					// artifact not mapped to SDA component, ignore it
 					setSDAResult(newArtifact, NOT_MAPPED, null)
+				} else if (result == "NOT EXISTS") {
+					// mapped SDA component does not exist
+					setSDAResult(newArtifact, NOT_EXISTS, null)
 				} else if (result == "PENDING") {
 					// no version data found yet, wait and retry
                 } else if (result == "UNSUPPORTED") {
                     // artifact type is not yet supported
                     setSDAResult(newArtifact, UNSUPPORTED, "artifact type unsupported")
+				} else if (result == "UNKNOWN") {
+					// some form of error?
 				} else {
 					// uploaded successfully
 					setSDAResult(newArtifact, UPLOADED, result)
@@ -140,17 +144,16 @@ jobs {
 
 storage {
     afterCreate { item ->
-		log.debug "Created new artefact $item.repoPath"
-		log.debug "repoKey = $item.repoPath.repoKey"		// store in version property repoKey
-		log.debug "repoPath path = $item.repoPath.path"		// store in version property repoPath, replacing ":" with /
-		log.debug "repoPath name = $item.repoPath.name" 	// file to upload
-
-		def conf = repositories.getRepositoryConfiguration(item.repoPath.repoKey)
-		log.debug "repository type = " + conf.getType() // i.e. local/remote
-		log.debug "repository layout = " + conf.getRepoLayoutRef() // i.e. maven-2-default
-
 		RepoPath repoPath = item.repoPath
-		if (repoPath.isFile()) {
+		if (repoPath.isFile() && !getExtension(repoPath.path).equalsIgnoreCase('pom')
+			&& !getExtension(repoPath.path).equalsIgnoreCase('xml')) {
+			def conf = repositories.getRepositoryConfiguration(item.repoPath.repoKey)
+			log.debug "Created new artefact $item.repoPath"
+			log.debug "repoKey = $item.repoPath.repoKey"		
+			log.debug "repoPath path = $item.repoPath.path"		
+			log.debug "repoPath name = $item.repoPath.name"
+			log.debug "repository type = " + conf.getType() // i.e. local/remote
+			log.debug "repository layout = " + conf.getRepoLayoutRef() // i.e. maven-2-default
 			try {
 				log.info "Marking artifact $item.repoPath as a candidate to upload to SDA"
 				setSDAStatus(repoPath, NEW)
@@ -168,14 +171,15 @@ storage {
 String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
 	String defaultServerURL = sdaDefaults.get('serverURL')
 	if (!defaultServerURL.endsWith("/")) {
-		defaultServerURL = defaultServerURL + "/";
+		defaultServerURL = defaultServerURL + "/"
 	}
 	String defaultUsername = sdaDefaults.get('username')
 	String defaultPassword = sdaDefaults.get('password')
-	String authToken = makeAuthToken(defaultUsername, defaultPassword)
+	Boolean mapByDefault = sdaDefaults.get('mapByDefault').toBoolean()
+	Boolean createProps = sdaDefaults.get('createProps').toBoolean()
+	Boolean enhancedProps = sdaDefaults.get('enhancedProps').toBoolean()
+	String authToken = createAuthToken(defaultUsername, defaultPassword)
     def conf = repositories.getRepositoryConfiguration(repoPath.repoKey)
-    //log.debug "repository type = " + conf.getType() // i.e. local/remote
-    //log.debug "repository layout = " + conf.getRepoLayoutRef() // i.e. maven-2-default
     if (conf.isEnableNuGetSupport()) {
         log.debug "Artifact is a NuGet package..."
         org.artifactory.md.Properties properties = repositories.getProperties(repoPath)
@@ -183,22 +187,23 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
         String nugetVer = repositories.getProperty(repoPath, 'nuget.version')
         if (nugetId) {
             log.info "Found version ${nugetVer} of package ${nugetId}"
-			// is this file in the mapping file?
+			// is this component mapped in the config file?
 			String mappedComponent = sdaMapping.get(nugetId + '.component')
 			String mappedUsername  = sdaMapping.get(nugetId + '.username')
 			String mappedPassword  = sdaMapping.get(nugetId + '.password')
 			if (mappedComponent) {
-            	log.debug "Found mapping to SDA component ${mappedComponent}"
+            	log.debug "Found mapping to SDA component ${mappedComponent}, checking if component exists..."
                 if (mappedUsername) {
-                    authToken = makeAuthToken(mappedUsername, mappedPassword)
-                } 		
-				// TODO: Upload Nuget package and return SDA version url
-				// try if 404 not found...
-                String compVerUrl = createComponentVersion(mappedComponent, nugetVer, defaultServerURL, authToken)
-				return compVerUrl
+                    authToken = createAuthToken(mappedUsername, mappedPassword)
+                }  
+				if (componentExists(mappedComponent, defaultServerURL, authToken)) {
+					// TODO, create version properties
+					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, nugetVer, repoPath, enhancedProps)
+				} else {
+					return "NOT EXISTS"
+				}						
 			} else {
 				log.info "No mapping found for this component, it will not be uploaded"
-				// TODO: set status to not required
 				return "NOT MAPPED"
 			}	
         } else {
@@ -217,33 +222,30 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
         if (mvnVerId) {
             log.info "Found version ${mvnVerId} of module ${mvnArtifactId}"
             // is this file in the mapping file?
-            def sdaComponent = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.component')
-            def sdaUsername = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.username')
-            def sdaPassword = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.password')
-            if (sdaComponent) {
-                log.debug "Found mapping to SDA component ${sdaComponent} as user ${sdaUsername}"
-                // TODO: Upload Maven module and return SDA version url
-                return ">SDA URL<"
+			log.debug mvnGroupId + "." + mvnArtifactId + '.component'
+            String mappedComponent = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.component')
+            String mappedUsername = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.username')
+            String mappedPassword = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.password')
+            if (mappedComponent) {
+                log.debug "Found mapping to SDA component ${mappedComponent}, checking if component exists..."
+                if (mappedUsername) {
+                    authToken = createAuthToken(mappedUsername, mappedPassword)
+                }  	
+				if (componentExists(mappedComponent, defaultServerURL, authToken)) {
+					// TODO, create version properties
+					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, mvnVerId, repoPath, enhancedProps)
+				} else {
+					return "NOT EXISTS"
+				}		
             } else {
-                log.info "No mapping found for this component, it will not be uploaded"
-                // TODO: set status to not required
-                return "NOT MAPPED"
+				log.info "No mapping found for this component, it will not be uploaded"
+				return "NOT MAPPED"
             }
         } else {
             log.info "Maven metadata not found, waiting..."
             // TODO, Set to not found
             return "PENDING"
         }
-        /*
-        FileLayoutInfo currentLayout = repositories.getLayoutInfo(repoPath)
-        ['organization', 'module', 'baseRevision', 'folderIntegrationRevision', 'fileIntegrationRevision', 'classifier', 'ext', 'type'].each { String propName ->
-            log.info propName + " = " + currentLayout."${propName}"
-        }
-        //log.info repoPath.getName()
-        //log.info repoPath.getRepoKey()
-        //log.info repoPath.getPath()
-        //log.info repoPath.getParent().getPath()
-        */
     }
 }
 
@@ -260,6 +262,48 @@ private void setSDAResult(RepoPath repoPath, SDAUploadStatuses status, String re
 	}	
 }
 
+private String createSDAVersionAndProps(String serverURL, String authToken, String componentName, String versionName, RepoPath repoPath, Boolean enhancedProps) {
+	String verUrl = null
+	def conf = repositories.getRepositoryConfiguration(repoPath.repoKey)
+	
+	//
+	// TODO: check if version already exists
+	//
+	
+	// get the id of the component we are creating version for
+	String componentId = getComponentId(componentName, serverURL, authToken)
+	// create the new version and retrieve its id
+	String versionId = createComponentVersion(componentName, versionName, serverURL, authToken)
+	if (versionId) {
+		// get property sheet for newly created version
+		String propSheetId = getComponentVersionPropsheetId(componentName, versionId, serverURL, authToken);
+		// set properties with artifactory data
+		String encodedPropSheetId = "components%26${componentId}%26versions%26${versionId}%26propSheetGroup%26propSheets%26${propSheetId}.-1/allPropValues";
+		JSONObject jsonProps = new JSONObject();
+		
+		//
+		// TODO: create if extended props is set
+		//
+		
+		//jsonProps.put("repository.type", conf.getType())
+		//jsonProps.put("repository.layout", conf.getRepoLayoutRef())
+		//jsonProps.put("repository.key", repoPath.getRepoKey())
+		//jsonProps.put("module.id", )		
+		jsonProps.put("artifact.name", "$repoPath.name")
+		jsonProps.put("repository.path", "$repoPath.path")	
+		//log.debug "JSON Properties for version = " + jsonProps.toString()
+		try {
+			HttpPut put = new HttpPut("${serverURL}property/propSheet/${encodedPropSheetId}")
+			HttpResponse response = executeHttpRequest(authToken, put, 204, jsonProps)
+			log.debug "Succesfully created propertires on version id ${versionId}"
+			verUrl = "${serverURL}app#/version/${versionId}"
+		} catch (HttpResponseException ex) {
+			log.error("The property sheet ${encodedPropSheetId} does not exist, or is not visible to the user")
+		}	
+	}	
+	return verUrl
+}	
+				
 /*def isRemote(String repoKey) {
     if (repoKey.endsWith('-cache')) repoKey = repoKey.substring(0, repoKey.length() - 6)
     return repositories.getRemoteRepositories().contains(repoKey)
@@ -269,65 +313,157 @@ private void setSDAResult(RepoPath repoPath, SDAUploadStatuses status, String re
 //  SDA supporting functions
 //
 
-private String createComponentVersion(String componentName, String versionName, String sdaServerUrl, String authToken) {
-	HttpPost post = new HttpPost("${sdaServerUrl}cli/version/createVersion?component=${componentName}&name=${versionName}")
-	log.info "creating new version ${versionName} on component ${componentName}"
-	def postResult = executeHttpRequest(authToken, post, 200, null);
-    // TODO: extract URL from return and return it
+private boolean checkServerExists(String sdaServerUrl, String authToken) {
+	log.info "Checking if server ${sdaServerUrl} exists..."
+	try {
+		HttpGet get = new HttpGet("${sdaServerUrl}rest/state")
+		executeHttpRequest(authToken, get, 200, null)
+		log.debug "Found server ${sdaServerUrl}"
+		return true
+	} catch (java.net.ConnectException ex) {
+		log.error("The server ${sdaServerUrl} does not exist, or is not accessible to the user")
+		return false
+	}
 }
 
-private String makeAuthToken(String username, String password) {
+private boolean componentExists(String componentName, String sdaServerUrl, String authToken) {
+	log.info "Checking if component ${componentName} exists..."
+	try {
+		HttpGet get = new HttpGet("${sdaServerUrl}cli/component/info?component=${componentName}")
+		HttpResponse response = executeHttpRequest(authToken, get, 200, null)
+		if (response.getStatusLine().getStatusCode() == 404) {
+			log.debug "Could not find component ${componentName}"
+			return false
+		} else {	
+			log.debug "Found component ${componentName}"
+			return true
+		}	
+	} catch (HttpResponseException ex) {
+		log.error("The component ${componentName} does not exist, or is not visible to the user")
+		return false
+	}
+}
+
+private String createComponentVersion(String componentName, String versionName, String sdaServerUrl, String authToken) {
+	log.info "Creating new component version ${versionName} on component ${componentName}"
+    try {
+		HttpPost post = new HttpPost("${sdaServerUrl}cli/version/createVersion?component=${componentName}&name=${versionName}")
+		HttpResponse response = executeHttpRequest(authToken, post, 200, null)
+		log.debug "Succesfully created component version ${versionName} on component ${componentName}"
+		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
+        String json = reader.readLine()
+        JSONObject jsonResponse = new JSONObject(new JSONTokener(json))
+        String cVerId = jsonResponse.getString("id")
+        log.debug "Created component version with id ${cVerId}"
+		return cVerId
+	} catch (HttpResponseException ex) {
+		log.error("The component ${componentName} does not exist, the version already exists or the component is not visible to the user")
+		return null
+	}
+}
+
+private String getComponentVersionPropsheetId(String componentName, String versionId, String sdaServerUrl, String authToken) {
+	log.debug "Retrieving details for version id ${versionId} of component ${componentName}"
+	try {
+		HttpGet get = new HttpGet("${sdaServerUrl}rest/deploy/version/${versionId}")
+		HttpResponse response = executeHttpRequest(authToken, get, 200, null)
+		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
+        String json = reader.readLine()
+		//log.debug json.toString()
+        JSONArray propSheets = new JSONObject(new JSONTokener(json)).getJSONArray("propSheets")
+		String propSheetId = null
+		if (propSheets != null) {
+			JSONObject propertyJson = propSheets.getJSONObject(0)
+			propSheetId = propertyJson.getString("id").trim()
+		}
+		log.debug "component version propsheet id = " + propSheetId
+		return propSheetId
+	} catch (HttpResponseException ex) {
+		log.error("The version id ${versionId} of component ${componentName} does not exist, or is not visible to the user")
+		return null
+	}
+}
+	
+private String getComponentId(String componentName, String sdaServerUrl, String authToken) {
+	log.debug "Retrieving details for component ${componentName}."
+	try {
+		HttpGet get = new HttpGet("${sdaServerUrl}rest/deploy/component/${componentName}")
+		HttpResponse response = executeHttpRequest(authToken, get, 200, null)
+		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
+        String json = reader.readLine()
+		//log.debug json.toString()
+		JSONObject jsonResponse = new JSONObject(new JSONTokener(json))
+        String componentId = jsonResponse.getString("id")
+        log.debug "component id = ${componentId}"
+		return componentId
+	} catch (HttpResponseException ex) {
+		log.error("The component ${componentName} does not exist, or is not visible to the user")
+		return null
+	}
+}
+
+//
+// Generic HTTP supporting functions
+//
+
+/**
+ * Create a Base 64 authetication token
+ * @param username HTTP Basic username
+ * @param password HTTP Basic password
+ * @return A Base 64 encoded authentication token
+ */
+private String createAuthToken(String username, String password) {
 	String creds = username + ':' + password
 	return "Basic " + creds.bytes.encodeBase64().toString()
 }
 
+/**
+ * Execute an HTTP request and return the response.
+ * @param authToken The Base 64 authentication token to use.
+ * @parm request The request object to use, HttpGet, HttpPost, HttpPut etc
+ * @param expectedStatus The expected HTTP code to receive on success
+ * @param body A JSON body object to send with the request
+ * @return a HttpResoonse object containing the results of the request
+ */
 private HttpResponse executeHttpRequest(String authToken, Object request, int expectedStatus, JSONObject body) {
 	// Make sure the required parameters are there
-	if ((request == null) || (expectedStatus == null)) exitFailure("An error occurred executing the request.");
+	if ((request == null) || (expectedStatus == null)) httpFailure("An error occurred executing the request.")
 
 	log.debug "Sending request: ${request}"
-	if (body != null) log.debug "Body contents: ${body}";
+	if (body != null) log.debug "Body contents: ${body}"
 
-	HttpClient client = new DefaultHttpClient();
-	request.setHeader("DirectSsoInteraction", "true");
-	request.setHeader("Authorization", authToken);
+	HttpClient client = new DefaultHttpClient()
+	request.setHeader("DirectSsoInteraction", "true")
+	request.setHeader("Authorization", authToken)
 	if (body) {
-		StringEntity input = new StringEntity(body.toString());
-		input.setContentType("application/json");
-		request.setEntity(input);
+		StringEntity input = new StringEntity(body.toString())
+		input.setContentType("application/json")
+		request.setEntity(input)
 	}
 
-	HttpResponse response;
+	HttpResponse response
 	try {
-		response = client.execute(request);
+		response = client.execute(request)
 	} catch (HttpException e) {
-		exitFailure("There was an error executing the request.");
+		httpFailure("There was an error executing the request.")
 	}
 
-	int responseCode = response.getStatusLine().getStatusCode();
+	int responseCode = response.getStatusLine().getStatusCode()
 	if ((responseCode != expectedStatus) && responseCode != 404) {
-		httpFailure(response);
+		httpFailure(response)
 	}
 
-	log.debug "Received the response: " + response.getStatusLine();
+	log.debug "Received the response: " + response.getStatusLine()
 
-	return response;
+	return response
 }
 
 /**
- * Write an error message to console and exit on a fail status.
- * @param message The error message to write to the console.
+ * Write a HTTP error message to the log.
+ * @param message The error message to write to the log.
  */
-def exitFailure(String message) {
-	log.error "${message}";
-}
-
-/**
- * Write a HTTP error message to console and exit on a fail status.
- * @param message The error message to write to the console.
- */
-def httpFailure(HttpResponse response) {
-	log.error "Request failed : " + response.getStatusLine();
-	String responseString = new BasicResponseHandler().handleResponse(response);
-	log.error "${responseString}";
+private httpFailure(HttpResponse response) {
+	log.error "Request failed : " + response.getStatusLine()
+	String responseString = new BasicResponseHandler().handleResponse(response)
+	log.error "${responseString}"
 }
