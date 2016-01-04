@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Serena Software.
+ * Copyright (C) 2016 Serena Software.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ import static com.google.common.collect.Multimaps.forMap
 /**
  * Artifactory User Plugin to publish/upload new artifacts into Serena Deployment Automation.
  *
- * @author Kevin Lee
+ * @author Kevin Lee (klee@serena.com)
  */
 
 //
@@ -135,7 +135,7 @@ jobs {
 					setSDAResult(newArtifact, UPLOADED, result)
 				}
             } catch (Exception e) {
-                log.debug("exception caught", e)
+                log.debug("Exception caught", e)
                 setSDAResult(newArtifact, FAILED_UPLOAD, e.getMessage())
             }
         }
@@ -148,18 +148,23 @@ storage {
 		if (repoPath.isFile() && !getExtension(repoPath.path).equalsIgnoreCase('pom')
 			&& !getExtension(repoPath.path).equalsIgnoreCase('xml')) {
 			def conf = repositories.getRepositoryConfiguration(item.repoPath.repoKey)
-			log.debug "Created new artefact $item.repoPath"
+			log.debug "Created new artifact $item.repoPath"
 			log.debug "repoKey = $item.repoPath.repoKey"		
 			log.debug "repoPath path = $item.repoPath.path"		
 			log.debug "repoPath name = $item.repoPath.name"
 			log.debug "repository type = " + conf.getType() // i.e. local/remote
 			log.debug "repository layout = " + conf.getRepoLayoutRef() // i.e. maven-2-default
-			try {
-				log.info "Marking artifact $item.repoPath as a candidate to upload to SDA"
-				setSDAStatus(repoPath, NEW)
-			} catch (Exception e) {
-				log.error("Could not set SDA Upload property on $item", e)
-			}
+			def repositories = sdaDefaults.get("repositories")
+			if (repositories.contains(item.repoPath.repoKey)) { 
+				try {
+					log.info "Marking artifact $item.repoPath as a candidate to upload to SDA"
+					setSDAStatus(repoPath, NEW)
+				} catch (Exception e) {
+					log.error("Could not set SDA Upload property on $item", e)
+				}
+			} else {
+				log.info "Repository $item.repoPath.repoKey is not mapped, ignoring artifact"
+			}	
 		}
     }
 }
@@ -198,7 +203,7 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
                 }  
 				if (componentExists(mappedComponent, defaultServerURL, authToken)) {
 					// TODO, create version properties
-					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, nugetVer, repoPath, enhancedProps)
+					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, nugetVer, repoPath, createProps, enhancedProps)
 				} else {
 					return "NOT EXISTS"
 				}						
@@ -222,7 +227,6 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
         if (mvnVerId) {
             log.info "Found version ${mvnVerId} of module ${mvnArtifactId}"
             // is this file in the mapping file?
-			log.debug mvnGroupId + "." + mvnArtifactId + '.component'
             String mappedComponent = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.component')
             String mappedUsername = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.username')
             String mappedPassword = sdaMapping.get(mvnGroupId + "." + mvnArtifactId + '.password')
@@ -232,8 +236,7 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
                     authToken = createAuthToken(mappedUsername, mappedPassword)
                 }  	
 				if (componentExists(mappedComponent, defaultServerURL, authToken)) {
-					// TODO, create version properties
-					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, mvnVerId, repoPath, enhancedProps)
+					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, mvnVerId, repoPath, createProps, enhancedProps)
 				} else {
 					return "NOT EXISTS"
 				}		
@@ -262,36 +265,47 @@ private void setSDAResult(RepoPath repoPath, SDAUploadStatuses status, String re
 	}	
 }
 
-private String createSDAVersionAndProps(String serverURL, String authToken, String componentName, String versionName, RepoPath repoPath, Boolean enhancedProps) {
+private String createSDAVersionAndProps(String serverURL, String authToken, String componentName, String versionName, RepoPath repoPath, Boolean createProps, Boolean enhancedProps) {
 	String verUrl = null
 	def conf = repositories.getRepositoryConfiguration(repoPath.repoKey)
 	
-	//
 	// TODO: check if version already exists
-	//
 	
 	// get the id of the component we are creating version for
 	String componentId = getComponentId(componentName, serverURL, authToken)
 	// create the new version and retrieve its id
 	String versionId = createComponentVersion(componentName, versionName, serverURL, authToken)
 	if (versionId) {
+		// create component version properties
+		if (createProps) {
+			List properties = getComponentVersionProps(componentName, componentId, serverURL, authToken)
+			log.debug properties.toString()		
+			if (!properties.contains("artifact.name"))
+				createComponentVersionProp("artifact.name", "Artifact Name", componentName, componentId, serverURL, authToken)
+			if (!properties.contains("repository.path"))			
+				createComponentVersionProp("repository.path", "Repository Path", componentName, componentId, serverURL, authToken)
+			if (enhancedProps) {
+				if (!properties.contains("repository.type"))
+					createComponentVersionProp("repository.type", "Repository Type", componentName, componentId, serverURL, authToken)
+				if (!properties.contains("repository.layout"))
+					createComponentVersionProp("repository.layout", "Repository Layout", componentName, componentId, serverURL, authToken)
+				if (!properties.contains("repository.key"))
+					createComponentVersionProp("repository.key", "Repository Key", componentName, componentId, serverURL, authToken)
+			}	
+		}
+		
 		// get property sheet for newly created version
-		String propSheetId = getComponentVersionPropsheetId(componentName, versionId, serverURL, authToken);
+		String propSheetId = getComponentVersionPropsheetId(componentName, versionId, serverURL, authToken)
 		// set properties with artifactory data
 		String encodedPropSheetId = "components%26${componentId}%26versions%26${versionId}%26propSheetGroup%26propSheets%26${propSheetId}.-1/allPropValues";
 		JSONObject jsonProps = new JSONObject();
-		
-		//
-		// TODO: create if extended props is set
-		//
-		
-		//jsonProps.put("repository.type", conf.getType())
-		//jsonProps.put("repository.layout", conf.getRepoLayoutRef())
-		//jsonProps.put("repository.key", repoPath.getRepoKey())
-		//jsonProps.put("module.id", )		
 		jsonProps.put("artifact.name", "$repoPath.name")
 		jsonProps.put("repository.path", "$repoPath.path")	
-		//log.debug "JSON Properties for version = " + jsonProps.toString()
+		if (enhancedProps) {
+			jsonProps.put("repository.type", conf.getType())
+			jsonProps.put("repository.layout", conf.getRepoLayoutRef())
+			jsonProps.put("repository.key", repoPath.getRepoKey())	
+		}
 		try {
 			HttpPut put = new HttpPut("${serverURL}property/propSheet/${encodedPropSheetId}")
 			HttpResponse response = executeHttpRequest(authToken, put, 204, jsonProps)
@@ -346,6 +360,7 @@ private boolean componentExists(String componentName, String sdaServerUrl, Strin
 
 private String createComponentVersion(String componentName, String versionName, String sdaServerUrl, String authToken) {
 	log.info "Creating new component version ${versionName} on component ${componentName}"
+	// TODO: check if version already exists
     try {
 		HttpPost post = new HttpPost("${sdaServerUrl}cli/version/createVersion?component=${componentName}&name=${versionName}")
 		HttpResponse response = executeHttpRequest(authToken, post, 200, null)
@@ -362,6 +377,31 @@ private String createComponentVersion(String componentName, String versionName, 
 	}
 }
 
+private String createComponentVersionProp(String propName, String propDesc, String componentName, String componentId, String sdaServerUrl, String authToken) {
+	log.info "Creating component version property ${propName} on component ${componentName}"
+	// TODO: check if version property already exists
+    try {
+		HttpPut put = new HttpPut("${sdaServerUrl}property/propSheetDef/components&${componentId}&versionPropSheetDef.-1/propDefs")
+		JSONObject jsonProps = new JSONObject()
+		jsonProps.put("name", propName)
+		jsonProps.put("description", propDesc)
+		jsonProps.put("label", propDesc)
+		jsonProps.put("required", false)
+		jsonProps.put("type", "TEXT")
+		jsonProps.put("value", "")
+		HttpResponse response = executeHttpRequest(authToken, put, 200, jsonProps)
+		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
+        String json = reader.readLine()
+        JSONObject jsonResponse = new JSONObject(new JSONTokener(json))
+        String cVerPropId = jsonResponse.getString("id")
+        log.debug "Created component version property with id ${cVerPropId}"
+		return cVerPropId
+	} catch (HttpResponseException ex) {
+		log.error("The component ${componentName} does not exist, the version property ${propName} already exists or the component is not visible to the user")
+		return null
+	}
+}
+
 private String getComponentVersionPropsheetId(String componentName, String versionId, String sdaServerUrl, String authToken) {
 	log.debug "Retrieving details for version id ${versionId} of component ${componentName}"
 	try {
@@ -369,14 +409,12 @@ private String getComponentVersionPropsheetId(String componentName, String versi
 		HttpResponse response = executeHttpRequest(authToken, get, 200, null)
 		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
         String json = reader.readLine()
-		//log.debug json.toString()
         JSONArray propSheets = new JSONObject(new JSONTokener(json)).getJSONArray("propSheets")
 		String propSheetId = null
 		if (propSheets != null) {
 			JSONObject propertyJson = propSheets.getJSONObject(0)
 			propSheetId = propertyJson.getString("id").trim()
 		}
-		log.debug "component version propsheet id = " + propSheetId
 		return propSheetId
 	} catch (HttpResponseException ex) {
 		log.error("The version id ${versionId} of component ${componentName} does not exist, or is not visible to the user")
@@ -391,11 +429,29 @@ private String getComponentId(String componentName, String sdaServerUrl, String 
 		HttpResponse response = executeHttpRequest(authToken, get, 200, null)
 		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
         String json = reader.readLine()
-		//log.debug json.toString()
 		JSONObject jsonResponse = new JSONObject(new JSONTokener(json))
         String componentId = jsonResponse.getString("id")
-        log.debug "component id = ${componentId}"
 		return componentId
+	} catch (HttpResponseException ex) {
+		log.error("The component ${componentName} does not exist, or is not visible to the user")
+		return null
+	}
+}
+
+private List getComponentVersionProps(String componentName, String componentId, String sdaServerUrl, String authToken) {
+	log.debug "Retrieving version properties for component ${componentName}."
+	try {
+		HttpGet get = new HttpGet("${sdaServerUrl}property/propSheetDef/components&${componentId}&versionPropSheetDef.-1/propDefsPaged")
+		HttpResponse response = executeHttpRequest(authToken, get, 200, null)
+		BufferedReader reader = new BufferedReader(new InputStreamReader(response.getEntity().getContent()))
+        String json = reader.readLine()
+		JSONObject jsonResponse = new JSONObject(new JSONTokener(json))
+        JSONArray records = jsonResponse.getJSONArray("records")
+		def propNames = []
+		for (int i = 0; i < records.length(); i++) {
+			propNames.add(records.getJSONObject(i).getString("name"));
+		}
+		return propNames
 	} catch (HttpResponseException ex) {
 		log.error("The component ${componentName} does not exist, or is not visible to the user")
 		return null
