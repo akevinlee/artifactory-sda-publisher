@@ -149,9 +149,9 @@ storage {
 			&& !getExtension(repoPath.path).equalsIgnoreCase('xml')) {
 			def conf = repositories.getRepositoryConfiguration(item.repoPath.repoKey)
 			log.debug "Created new artifact $item.repoPath"
-			log.debug "repoKey = $item.repoPath.repoKey"		
-			log.debug "repoPath path = $item.repoPath.path"		
-			log.debug "repoPath name = $item.repoPath.name"
+			log.debug "repository name = $item.repoPath.repoKey"		
+			log.debug "artifact path = $item.repoPath.path"		
+			log.debug "artifact name = $item.repoPath.name"
 			log.debug "repository type = " + conf.getType() // i.e. local/remote
 			log.debug "repository layout = " + conf.getRepoLayoutRef() // i.e. maven-2-default
 			def repositories = sdaDefaults.get("repositories")
@@ -203,7 +203,7 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
                 }  
 				if (componentExists(mappedComponent, defaultServerURL, authToken)) {
 					// TODO, create version properties
-					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, nugetVer, repoPath, createProps, enhancedProps)
+					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, null, nugetId, nugetVer, repoPath, createProps, enhancedProps)
 				} else {
 					return "NOT EXISTS"
 				}						
@@ -236,7 +236,7 @@ String SDAUpload(RepoPath repoPath, def sdaDefaults, def sdaMapping) {
                     authToken = createAuthToken(mappedUsername, mappedPassword)
                 }  	
 				if (componentExists(mappedComponent, defaultServerURL, authToken)) {
-					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, mvnVerId, repoPath, createProps, enhancedProps)
+					return createSDAVersionAndProps(defaultServerURL, authToken, mappedComponent, mvnGroupId, mvnArtifactId, mvnVerId, repoPath, createProps, enhancedProps)
 				} else {
 					return "NOT EXISTS"
 				}		
@@ -265,7 +265,7 @@ private void setSDAResult(RepoPath repoPath, SDAUploadStatuses status, String re
 	}	
 }
 
-private String createSDAVersionAndProps(String serverURL, String authToken, String componentName, String versionName, RepoPath repoPath, Boolean createProps, Boolean enhancedProps) {
+private String createSDAVersionAndProps(String serverURL, String authToken, String componentName, String groupName, String artifactName, String versionName, RepoPath repoPath, Boolean createProps, Boolean enhancedProps) {
 	String verUrl = null
 	def conf = repositories.getRepositoryConfiguration(repoPath.repoKey)
 	
@@ -280,17 +280,17 @@ private String createSDAVersionAndProps(String serverURL, String authToken, Stri
 		if (createProps) {
 			List properties = getComponentVersionProps(componentName, componentId, serverURL, authToken)
 			log.debug properties.toString()		
+			if (!properties.contains("repository.name"))			
+				createComponentVersionProp("repository.name", "Repository Name", componentName, componentId, serverURL, authToken)
 			if (!properties.contains("artifact.name"))
 				createComponentVersionProp("artifact.name", "Artifact Name", componentName, componentId, serverURL, authToken)
-			if (!properties.contains("repository.path"))			
-				createComponentVersionProp("repository.path", "Repository Path", componentName, componentId, serverURL, authToken)
+			if (!properties.contains("artifact.path"))
+				createComponentVersionProp("artifact.path", "Artifact Path", componentName, componentId, serverURL, authToken)			
 			if (enhancedProps) {
 				if (!properties.contains("repository.type"))
 					createComponentVersionProp("repository.type", "Repository Type", componentName, componentId, serverURL, authToken)
 				if (!properties.contains("repository.layout"))
 					createComponentVersionProp("repository.layout", "Repository Layout", componentName, componentId, serverURL, authToken)
-				if (!properties.contains("repository.key"))
-					createComponentVersionProp("repository.key", "Repository Key", componentName, componentId, serverURL, authToken)
 			}	
 		}
 		
@@ -299,12 +299,15 @@ private String createSDAVersionAndProps(String serverURL, String authToken, Stri
 		// set properties with artifactory data
 		String encodedPropSheetId = "components%26${componentId}%26versions%26${versionId}%26propSheetGroup%26propSheets%26${propSheetId}.-1/allPropValues";
 		JSONObject jsonProps = new JSONObject();
+		jsonProps.put("repository.name", repoPath.getRepoKey())	
 		jsonProps.put("artifact.name", "$repoPath.name")
-		jsonProps.put("repository.path", "$repoPath.path")	
+		if (groupName)
+			jsonProps.put("artifact.path", "${groupName}/${artifactName}/${versionName}")
+		else 
+			jsonProps.put("artifact.path", "${artifactName}/${versionName}")
 		if (enhancedProps) {
 			jsonProps.put("repository.type", conf.getType())
 			jsonProps.put("repository.layout", conf.getRepoLayoutRef())
-			jsonProps.put("repository.key", repoPath.getRepoKey())	
 		}
 		try {
 			HttpPut put = new HttpPut("${serverURL}property/propSheet/${encodedPropSheetId}")

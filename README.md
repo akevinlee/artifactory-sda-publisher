@@ -22,7 +22,7 @@ The plugin monitors artifactory for new versions. If a new version is uploaded (
 ## Example Setup
 
 1. Create a component in SDA, e.g. `gson`
-2. Create two version properties on the component called `repository.path` and `artifact.name`. These will be used to store the reference back to artifactory from SDA.
+2. Create two version properties on the component called `repository.name` and `artifact.path`. These will be used to store the reference back to Artifactory from SDA.
 3. Add a mapping in the configuration file from artifactory to SDA (see below).
 4. Upload a new artifact/version into Artifactory.
 
@@ -36,8 +36,12 @@ defaults {
 	username = "admin"
 	password = "admin"
 	mapByDefault = false 		// NOT YET USED
-	createProps = false 		// NOT YET USED
-	enhancedProps = false 		// NOT YET USED
+	createProps = true 			// Create the component version properties before setting them
+	enhancedProps = false 		// Create additional properties on the component version
+	repositories = [			// The repositories to monitor for new artifacts
+		"libs-release-local",
+		"nuget-local"
+	]
 }	
 mapping {
 	"Microsoft.Web.Infrastructure" {
@@ -45,7 +49,11 @@ mapping {
 		username = "admin"
 		password = "admin"
 		status = "BUILT" 		// NOT YET USED
-		process = "Deploy" 		// NOT YET USED
+		process = {				// NOT YET USED
+			appName = "Application"
+			envName = "Environment"
+			processName = "Process"
+		}
 	}	
 	"com.google.collections.google-collections" {
 		component = "google-collections"
@@ -64,7 +72,9 @@ mapping {
 
 ## Resolving/Downloading arifacts in SDA
 
-I am looking at writing an Artifactory specific SDA plugin in the future, but for now you should be able to use the metadata stored in a version (as component version properties) to download the artifact from Artifactory as part of an SDA component process. You would refer to the artifacts location in artifactory using `${p:version/repository.path}`. The existing Maven plugin should work with this approach or you could use command line to invoke [wget|https://www.gnu.org/software/wget/] or similar utility.
+To download artifacts from an SDA process you can make use of the Artifactory plugin (https://github.com/sda-community-plugins/Artifactory). This plugin defaults to use the component version properties `${p:version/repository.name}` and `${p:version/artifact.path}` that have been set from this publisher.
+
+The existing Maven plugin should also work with this approach or you could use command line to invoke [wget|https://www.gnu.org/software/wget/] or similar utility.
 
 ## Uploading existing artifacts
 
@@ -92,14 +102,14 @@ Since (currently) the configuration file is only loaded on startup, you can make
 
 # Limitations
 
-* Components need to exist in SDA with component version properties already created.
+* Components need to exist in SDA.
 * Plugin needs to be updated or Artifactory restarted to reload the configuration.
 
 # TODO
 
-1. Automatically create the version properties on a component if they do not exist.
+1. ~~Automatically create the version properties on a component if they do not exist.~~ DONE
 2. Allow the upload of artifact to an SDA component without a "mapping" entry if the artifact name and component name match.
-3. Create "enhanced" properties with more metadata about the artifact being uploaded (would need 1 above).
+3. ~~Create "enhanced" properties with more metadata about the artifact being uploaded (would need 1 above).~~ DONE
 3. Allow the status of the version to be set.
 4. Allow an Application/Component process to be executed on upload.
 5. Allow the configuration to be reloaded by monitoring the file, or by invoking a REST call on the plugin.
